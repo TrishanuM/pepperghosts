@@ -2,18 +2,19 @@ let buildings = [], drops = [], particles = [], mushroom = null;
 let phase = 'city', blackAlpha = 0, cityAlpha = 255;
 let W, H;
 let lastAX = 0, lastAY = 0;
-const SHAKE_THRESHOLD = 18;
+const SHAKE_THRESHOLD = 8;
 let shakeIdleTimer = null;
 
-let flashAlpha   = 0;
-let flashBalls   = [];
-let quakeAmt     = 0;
-let orangeEngulf = 0;
+let flashAlpha    = 0;
+let flashBalls    = [];
+let quakeAmt      = 0;
+let orangeEngulf  = 0;
+let dropFadeAlpha = 1.0;
 
 let voronoiCells = [];
 let fogAlpha     = 0;
 let fogDir       = 0;
-let fogSpeed     = 0.007;
+let fogSpeed     = 0.002;
 
 let globalQuakeX = 0, globalQuakeY = 0;
 
@@ -22,13 +23,17 @@ let shakeActive  = false;
 let bombInterval = null;
 let bombsStopped = false;
 
-let raidSound;
-let blastVideoEl = null;
+let raidSound      = null;
+let bellsSound     = null;
+let audioCtx       = null;
+let bellsConnected = false;
+let bellsSrc       = null;
+let bellsGain      = null;
 
 const LAYERS = [
-  { speed:1.6,  col:[200,210,240], win:[255,252,200], minH:55,  maxH:100, wR:[28,52], haze:0   },
-  { speed:0.9,  col:[120,130,165], win:[220,230,255], minH:110, maxH:195, wR:[38,72], haze:0.3 },
-  { speed:0.35, col:[60,68,98],    win:[160,180,240], minH:190, maxH:330, wR:[52,98], haze:0.6 },
+  { speed:1.6,  col:[200,210,240], win:[255,252,200], minH:90,  maxH:160, wR:[28,52], haze:0   },
+  { speed:0.9,  col:[120,130,165], win:[220,230,255], minH:160, maxH:280, wR:[38,72], haze:0.3 },
+  { speed:0.35, col:[60,68,98],    win:[160,180,240], minH:280, maxH:460, wR:[52,98], haze:0.6 },
 ];
 const GY = () => H - 22;
 
@@ -37,12 +42,9 @@ function buildVoronoi() {
   voronoiCells = [];
   for (let i = 0; i < 130; i++) {
     voronoiCells.push({
-      x:     random(W),
-      y:     random(H),
-      vx:    random(-0.25, 0.25),
-      vy:    random(-0.18, 0.18),
-      delay: random(0, 0.55),
-      size:  random(0.8, 1.5),
+      x: random(W), y: random(H),
+      vx: random(-0.25, 0.25), vy: random(-0.18, 0.18),
+      delay: random(0, 0.55), size: random(0.8, 1.5),
     });
   }
 }
@@ -66,28 +68,61 @@ function drawVoronoiFog(alpha) {
     rg.addColorStop(0.72, `rgba(165,172,188,${localA * 0.28})`);
     rg.addColorStop(1,    `rgba(145,155,172,0)`);
     dc.fillStyle = rg;
-    dc.beginPath();
-    dc.arc(c.x, c.y, r, 0, Math.PI * 2);
-    dc.fill();
+    dc.beginPath(); dc.arc(c.x, c.y, r, 0, Math.PI * 2); dc.fill();
   }
   dc.restore();
 }
 
 // ─── PRELOAD ─────────────────────────────────────────────────
 function preload() {
-  soundFormats('mp3');
-  raidSound = loadSound('raid.mp3');
-  blastVideoEl = document.createElement('video');
-  blastVideoEl.src = 'blast.mp4';
-  blastVideoEl.preload = 'auto';
-  blastVideoEl.playsInline = true;
-  blastVideoEl.muted = false;
-  blastVideoEl.style.cssText = `
-    display:none; position:fixed; top:0; left:0;
-    width:100%; height:100%; object-fit:cover; z-index:-1;
-  `;
-  document.body.appendChild(blastVideoEl);
-  blastVideoEl.onended = () => { blastVideoEl.style.display = 'none'; blastVideoEl.currentTime = 0; };
+  raidSound = document.createElement('audio');
+  raidSound.src = 'raid.mp3';
+  raidSound.loop = true;
+  raidSound.volume = 0.8;
+  document.body.appendChild(raidSound);
+
+  bellsSound = document.createElement('audio');
+  bellsSound.src = 'bells.mp3';
+  bellsSound.loop = true;
+  bellsSound.volume = 0.7;
+  document.body.appendChild(bellsSound);
+}
+
+// ─── BELLS HELPERS ───────────────────────────────────────────
+function connectBellsToCtx() {
+  if (bellsConnected || !audioCtx || !bellsSound) return;
+  bellsConnected = true;
+  bellsSrc  = audioCtx.createMediaElementSource(bellsSound);
+  bellsGain = audioCtx.createGain();
+  bellsGain.gain.value = 1.0;
+  bellsSrc.connect(bellsGain);
+  bellsGain.connect(audioCtx.destination);
+}
+
+function fadeBellsOut(duration) {
+  if (!bellsSound || bellsSound.paused) return;
+  let steps = 30, startVol = bellsSound.volume, i = 0;
+  let iv = setInterval(()=>{
+    i++;
+    bellsSound.volume = Math.max(0, startVol * (1 - i / steps));
+    if (i >= steps) {
+      bellsSound.pause();
+      bellsSound.volume = startVol;
+      clearInterval(iv);
+    }
+  }, duration / steps);
+}
+
+function fadeBellsIn(targetVol, duration) {
+  bellsSound.playbackRate = 1.0;
+  bellsSound.volume = 0;
+  bellsSound.play().catch(e => console.warn(e));
+  let steps = 30, i = 0;
+  let iv = setInterval(()=>{
+    i++;
+    bellsSound.volume = Math.min(targetVol, targetVol * (i / steps));
+    if (i >= steps) clearInterval(iv);
+  }, duration / steps);
 }
 
 // ─── SETUP ───────────────────────────────────────────────────
@@ -108,7 +143,6 @@ function draw() {
   background(0);
   const gy = GY();
 
-  // continuous quake while mushroom lives or fading to black
   if (mushroom || phase === 'fadeblack') {
     globalQuakeX = (random() - 0.5) * 22;
     globalQuakeY = (random() - 0.5) * 12;
@@ -124,24 +158,26 @@ function draw() {
     quakeAmt = max(0, quakeAmt - 0.012);
   }
 
-  // fog alpha update
   if (fogDir !== 0) {
     fogAlpha = constrain(fogAlpha + fogDir * fogSpeed, 0, 1);
     if (fogAlpha >= 1) fogDir = 0;
     if (fogAlpha <= 0) fogDir = 0;
   }
 
-  // 1. mushroom cloud drawn first (behind everything)
   if (mushroom) drawCloud(gy);
 
-  // 2. flash balls behind ground mask
   drawFlashBalls();
 
-  // 3. black mask hides cloud + flash below ground line
+  // mask everything below ground
   drawingContext.fillStyle = 'rgba(0,0,0,1)';
   drawingContext.fillRect(0, gy, W, H - gy);
 
-  // 4. orange engulf behind buildings — before translate
+  // black silhouette on buildings during flash and mushroom
+  if (phase === 'flashbang' || phase === 'mushroom') {
+    let silAlpha = (phase === 'flashbang') ? min(flashAlpha * 2, 1) : 1.0;
+    drawBuildingSilhouettes(gy, silAlpha);
+  }
+
   if (orangeEngulf > 0) {
     let dc = drawingContext;
     let engulfY = (mushroom && mushroom.engulfY) ? mushroom.engulfY : gy;
@@ -152,11 +188,9 @@ function draw() {
     og.addColorStop(0.55, `rgba(180,40,0,${min(orangeEngulf*1.4, 0.55)})`);
     og.addColorStop(0.8,  `rgba(60,10,0,${min(orangeEngulf, 0.45)})`);
     og.addColorStop(1,    'rgba(0,0,0,0)');
-    dc.fillStyle = og;
-    dc.fillRect(0, 0, W, H);
+    dc.fillStyle = og; dc.fillRect(0, 0, W, H);
   }
 
-  // 5. scene with quake translate
   translate(qx, qy);
   drawAtmosphere(gy);
   drawDrops(gy);
@@ -165,10 +199,8 @@ function draw() {
   updateParticles();
   resetMatrix();
 
-  // 6. voronoi fog over scene
   if (fogAlpha > 0) drawVoronoiFog(fogAlpha);
 
-  // 7. screen flash on top
   if (flashAlpha > 0) {
     let dc = drawingContext;
     let fg = dc.createRadialGradient(W*0.5, gy, 0, W*0.5, gy, W*0.9);
@@ -188,9 +220,9 @@ function draw() {
 function spawnFlashBalls(gy) {
   let cx = W * 0.5;
   flashBalls = [
-    { x: cx,          y: gy, r:0, maxR: W*0.60, vy:-5.5, life:1.0, decay:0.018, style:'white'  },
-    { x: cx - W*0.07, y: gy, r:0, maxR: W*0.44, vy:-3.8, life:1.0, decay:0.022, style:'orange' },
-    { x: cx + W*0.07, y: gy, r:0, maxR: W*0.34, vy:-2.6, life:1.0, decay:0.026, style:'red'    },
+    { x: cx,          y: gy, r:0, maxR:W*0.60, vy:-5.5, life:1.0, decay:0.018, style:'white'  },
+    { x: cx - W*0.07, y: gy, r:0, maxR:W*0.44, vy:-3.8, life:1.0, decay:0.022, style:'orange' },
+    { x: cx + W*0.07, y: gy, r:0, maxR:W*0.34, vy:-2.6, life:1.0, decay:0.026, style:'red'    },
   ];
 }
 
@@ -201,8 +233,8 @@ function drawFlashBalls() {
   for (let fb of flashBalls) {
     if (fb.life <= 0) continue;
     anyAlive = true;
-    fb.r   = min(fb.r + fb.maxR * 0.048, fb.maxR);
-    fb.y  += fb.vy; fb.vy *= 0.93;
+    fb.r    = min(fb.r + fb.maxR * 0.048, fb.maxR);
+    fb.y   += fb.vy; fb.vy *= 0.93;
     fb.life -= fb.decay;
     let a = max(0, fb.life);
     let rg = dc.createRadialGradient(fb.x, fb.y, 0, fb.x, fb.y, fb.r);
@@ -271,15 +303,15 @@ function drawDrops(gy) {
   noStroke();
   for (let i = 0; i < drops.length; i++) {
     let d = drops[i];
-    d.vy += 0.02;
-    d.y  += d.vy;  // BUG WAS HERE — was merged into comment
+    d.vy += 0.005;
+    d.y  += d.vy;
     d.x  += sin(frameCount * 0.03 + d.wobble) * 0.3;
     if (d.y > gy - 10) {
       d.y  = random(-180, -20);
       d.x  = random(W * 0.05, W * 0.95);
-      d.vy = random(0.8, 1.8);
+      d.vy = random(0.2, 0.6);
     }
-    let pulse = 0.8 + 0.2 * sin(frameCount * 0.14 + d.wobble);
+    let pulse = (0.8 + 0.2 * sin(frameCount * 0.14 + d.wobble)) * dropFadeAlpha;
     fill(180,   0,   0,  30 * pulse); ellipse(d.x, d.y, 28);
     fill(220,  20,  20,  80 * pulse); ellipse(d.x, d.y, 14);
     fill(255,  60,  60, 240 * pulse); ellipse(d.x, d.y,  6);
@@ -491,9 +523,9 @@ function drawCloud(gy) {
   let mx    = mushroom.x;
 
   if (t < 80) quakeAmt = max(quakeAmt, (1-t/80)*0.8);
-  if (t > 60 && phase==='mushroom') {
-    orangeEngulf = min(1,(t-60)/120);
-    mushroom.engulfY = mushroom.baseY - stemH * 0.5; // rises with stem
+  if (t > 160 && phase==='mushroom') {
+    orangeEngulf = min(1,(t-160)/120);
+    mushroom.engulfY = mushroom.baseY - stemH * 0.5;
   }
   if (orangeEngulf>=1 && phase==='mushroom') phase='fadeblack';
   if (phase==='flashbang' && flashAlpha<0.6) phase='mushroom';
@@ -503,7 +535,6 @@ function drawCloud(gy) {
   let a = alpha/255;
   if (a<=0) return;
 
-  // ground flash
   if (t < 30) {
     let gr=t*16, gf=(1-t/30);
     let fg=dc.createRadialGradient(mx,gy,0,mx,gy,gr);
@@ -515,7 +546,6 @@ function drawCloud(gy) {
     dc.fillStyle=fg; dc.beginPath(); dc.ellipse(mx,gy,gr,gr*0.32,0,0,Math.PI*2); dc.fill();
   }
 
-  // fire base
   if (t < 80) {
     let fireR = stemW*3.4*(t/80);
     for (let fi=0; fi<12; fi++) {
@@ -531,7 +561,6 @@ function drawCloud(gy) {
     }
   }
 
-  // stem
   let midY=mushroom.baseY-stemH*0.42, waistW=stemW*0.28;
   let stemGrad=dc.createLinearGradient(mx,mushroom.baseY,mx,capY);
   stemGrad.addColorStop(0,    `rgba(255,185,25,${0.96*a})`);
@@ -564,15 +593,13 @@ function drawCloud(gy) {
   upperGrad.addColorStop(1,  `rgba(130,78,55,${0.78*a})`);
   dc.fillStyle=upperGrad; dc.fill(up);
 
-  // stem rolls
   for (let i=0; i<14; i++) {
     let fr=(i+0.5)/14;
     let sy=lerp(mushroom.baseY,capY,fr*0.88);
     let spread=lerp(stemW*0.82,waistW,min(fr*2,1))+stemW*0.36;
     if (fr>0.5) spread=lerp(waistW,stemW*0.74,(fr-0.5)*2)+stemW*0.33;
     let rr=stemW*(0.22+0.12*sin(t*0.04+i));
-    let lv=round(lerp(200,95,fr));
-    let sv=round(lerp(90,35,fr));
+    let lv=round(lerp(200,95,fr)), sv=round(lerp(90,35,fr));
     for (let side of [-1,1]) {
       let rg=dc.createRadialGradient(mx+side*spread,sy,0,mx+side*spread,sy,rr);
       rg.addColorStop(0,`rgba(${lv+sv},${lv},${max(0,lv-sv*2)},${0.64*a})`);
@@ -581,7 +608,6 @@ function drawCloud(gy) {
     }
   }
 
-  // shockwave rings
   if (t<110) {
     let ringR=t*7.5, ringA=max(0,0.92-t/110);
     dc.strokeStyle=`rgba(255,245,100,${ringA*0.96*a})`; dc.lineWidth=5;
@@ -592,7 +618,6 @@ function drawCloud(gy) {
     dc.beginPath(); dc.ellipse(mx,gy,ringR*1.32,ringR*0.16,0,0,Math.PI*2); dc.stroke();
   }
 
-  // toroidal cap
   for (let pass=0; pass<3; pass++) {
     let pOff=pass*capR*0.09;
     for (let i=0; i<22; i++) {
@@ -608,7 +633,6 @@ function drawCloud(gy) {
     }
   }
 
-  // cauliflower knobs
   for (let i=0; i<26; i++) {
     let ang=(i/26)*Math.PI*2, ph2=t*0.035+i*0.45;
     let kr=capR*(0.65+0.18*Math.sin(ph2));
@@ -622,7 +646,6 @@ function drawCloud(gy) {
     dc.fillStyle=kg; dc.beginPath(); dc.arc(kx,ky,ks,0,Math.PI*2); dc.fill();
   }
 
-  // 3-circle rising fireball core
   let fbA=Math.min(1,t/18)*a;
   if (fbA>0) {
     let r1=capR*min(0.30,t*0.006), y1f=capY-t*0.55;
@@ -653,7 +676,6 @@ function drawCloud(gy) {
     dc.fillStyle=g3; dc.beginPath(); dc.arc(mx,y3f,r3,0,Math.PI*2); dc.fill();
   }
 
-  // anvil
   let anvilR=capR*(0.9+growEase(t)*0.6), anvilY=capY-capR*0.34;
   let ag=dc.createRadialGradient(mx,anvilY,anvilR*0.2,mx,anvilY,anvilR);
   ag.addColorStop(0,   `rgba(218,172,88,${0.70*a})`);
@@ -670,7 +692,6 @@ function drawCloud(gy) {
     dc.fillStyle=ag2; dc.beginPath(); dc.arc(ax,ay,ar,0,Math.PI*2); dc.fill();
   }
 
-  // ground light
   if (t<105) {
     let gi=1-t/105;
     let gg=dc.createRadialGradient(mx,gy,0,mx,gy,stemW*4.2);
@@ -680,7 +701,6 @@ function drawCloud(gy) {
     dc.fillStyle=gg; dc.beginPath(); dc.ellipse(mx,gy,stemW*4.2,stemW*1.2,0,0,Math.PI*2); dc.fill();
   }
 
-  // embers
   if (t%2===0 && t<135) {
     for (let i=0; i<7; i++) {
       particles.push({
@@ -699,13 +719,20 @@ function applyBlackOverlay() {
     blackAlpha = min(blackAlpha+1.5, 255);
     fill(8,3,2,blackAlpha); noStroke(); rect(0,0,W,H);
     if (blackAlpha>=255) {
-      if (raidSound&&raidSound.isPlaying()) { raidSound.stop(); raidSound.setVolume(1); }
-      blastVideoEl.pause(); blastVideoEl.style.display='none'; blastVideoEl.currentTime=0;
+      raidSound.pause();
+      raidSound.currentTime = 0;
+      raidSound.volume = 0.8;
+      bellsSound.pause();
+      bellsSound.currentTime = 0;
+      bellsSound.playbackRate = 1.0;
+      bellsSound.volume = 0.7;
       phase='fadein'; cityAlpha=0; orangeEngulf=0;
       mushroom=null; particles=[]; drops=[]; flashBalls=[];
-      bombsStopped=false; globalQuakeX=0; globalQuakeY=0;
+      bombsStopped=false; dropFadeAlpha=1.0;
+      globalQuakeX=0; globalQuakeY=0;
       buildCity();
       buildVoronoi(); fogAlpha=1.0; fogDir=-1; fogSpeed=0.004;
+      setTimeout(()=>{ fadeBellsIn(0.7, 3000); }, 1000);
     }
   } else if (phase==='fadein') {
     blackAlpha = max(blackAlpha-0.9, 0);
@@ -716,19 +743,19 @@ function applyBlackOverlay() {
 }
 
 // ─── MEDIA ───────────────────────────────────────────────────
-function playBlast() {
-  blastVideoEl.style.display='block'; blastVideoEl.currentTime=0;
-  blastVideoEl.play().catch(e=>console.warn('video play failed:',e));
-}
-
 function fadeOutRaid() {
-  if (!raidSound||!raidSound.isPlaying()) return;
-  let vol=raidSound.getVolume();
-  let fade=setInterval(()=>{
-    vol-=0.05;
-    if (vol<=0) { raidSound.stop(); raidSound.setVolume(1); clearInterval(fade); }
-    else raidSound.setVolume(vol);
-  },80);
+  if (!raidSound || raidSound.paused) return;
+  let fade = setInterval(()=>{
+    if (raidSound.volume > 0.05) {
+      raidSound.volume = Math.max(0, raidSound.volume - 0.05);
+    } else {
+      raidSound.volume = 0;
+      raidSound.pause();
+      raidSound.currentTime = 0;
+      raidSound.volume = 0.8;
+      clearInterval(fade);
+    }
+  }, 80);
 }
 
 // ─── BOMB SPAWNING ───────────────────────────────────────────
@@ -741,21 +768,24 @@ function spawnBomb() {
     let cx=W*0.5, spread=W*0.36;
     bx=cx+(random(-spread,spread)+random(-spread,spread)+random(-spread,spread))/3;
   }
-  drops.push({ x:bx, y:random(-180,-20), vy:random(0.8,1.8), wobble:random(TWO_PI) });
+  drops.push({ x:bx, y:random(-180,-20), vy:random(0.2,0.6), wobble:random(TWO_PI) });
 }
 
 function startBombInterval() {
   if (bombInterval) return;
-  phase='bombing';
-  if (raidSound&&!raidSound.isPlaying()) raidSound.play();
-  bombInterval=setInterval(()=>{
+  dropFadeAlpha = 1.0;
+  phase = 'bombing';
+  // fade bells out slowly over 4 seconds while raid plays on top
+  fadeBellsOut(4000);
+  if (raidSound.paused) raidSound.play().catch(e => console.warn(e));
+  bombInterval = setInterval(()=>{
     if (!bombsStopped) {
-      if (drops.length < 400) {
-        let n=floor(random(8,18));
-        for (let i=0;i<n;i++) spawnBomb();
+      if (drops.length < 80) {
+        let n = floor(random(1, 3));
+        for (let i=0; i<n; i++) spawnBomb();
       }
     }
-  },40);
+  }, 180);
 }
 
 function stopBombInterval() {
@@ -768,17 +798,21 @@ function onInputReleased() {
   if (drops.length===0) { bombsStopped=false; phase='city'; return; }
   bombsStopped=true;
 
+  let fadeInterval = setInterval(()=>{
+    dropFadeAlpha = max(0, dropFadeAlpha - 0.005);
+    if (dropFadeAlpha <= 0) { drops=[]; clearInterval(fadeInterval); }
+  }, 50);
+
   setTimeout(()=>{
     if (phase==='bombing') {
       fadeOutRaid();
-      playBlast();
       spawnFlashBalls(GY());
       drops=[];
       phase='flashbang'; flashAlpha=1.0; quakeAmt=1.0;
-      buildVoronoi(); fogAlpha=0; fogDir=1; fogSpeed=0.006;
-      setTimeout(()=>{ mushroom={ x:W*0.5, baseY:GY(), t:0 }; },80);
+      buildVoronoi(); fogAlpha=0; fogDir=1; fogSpeed=0.002;
+      setTimeout(()=>{ mushroom={ x:W*0.5, baseY:GY(), t:0 }; }, 80);
     }
-  },6000);
+  }, 8000);
 }
 
 // ─── INPUT ───────────────────────────────────────────────────
@@ -793,22 +827,50 @@ function keyReleased() {
   if (spaceHeld) { spaceHeld=false; onInputReleased(); }
 }
 
-// ─── MOTION ──────────────────────────────────────────────────
+// ─── MOTION + FIRST TAP ──────────────────────────────────────
 function registerMotion() {
-  if (typeof DeviceMotionEvent==='undefined') return;
-  if (typeof DeviceMotionEvent.requestPermission==='function') {
-    let btn=createButton('Tap to enable shake');
-    btn.style('font-size','22px'); btn.style('padding','14px 28px');
-    btn.style('background','#fff'); btn.style('color','#000');
-    btn.style('border','none'); btn.style('border-radius','10px');
-    btn.position(W/2-120,H/2-30);
-    btn.mousePressed(()=>{
-      DeviceMotionEvent.requestPermission()
-        .then(s=>{ if(s==='granted') attachMotionListener(); })
-        .catch(console.error);
-      btn.remove();
+  let overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.92); z-index:9999;
+    display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:20px;
+  `;
+  overlay.innerHTML = `
+    <p style="color:white; font-size:24px; font-family:sans-serif;
+      text-align:center; padding:0 40px; line-height:1.5;">
+      Tap anywhere to begin
+    </p>
+    <div style="color:white; font-size:52px;">👋</div>
+    <p style="color:rgba(255,255,255,0.5); font-size:14px; font-family:sans-serif;">
+      Shake the iPad to trigger bombs
+    </p>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', ()=>{
+    // AudioContext created directly inside tap — required for iOS
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume().then(()=>{
+      connectBellsToCtx();
+      bellsSound.playbackRate = 1.0;
+      bellsSound.volume = 0.7;
+      bellsSound.play().catch(e => console.warn(e));
     });
-  } else { attachMotionListener(); }
+
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
+      DeviceMotionEvent.requestPermission()
+        .then(state=>{
+          if (state==='granted') attachMotionListener();
+          overlay.remove();
+        })
+        .catch(err=>{ console.error(err); overlay.remove(); });
+    } else {
+      attachMotionListener();
+      overlay.remove();
+    }
+  });
 }
 
 function attachMotionListener() {
